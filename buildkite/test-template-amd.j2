@@ -41,7 +41,11 @@
 
 {# Native in-pod ROCm CI: per-job container-0 image via kubernetes podSpecPatch. #}
 {% macro amd_native_base_image() -%}
+{%- if aiter_nightly == "1" -%}
+rocm/vllm-dev:ci_base-aiter-nightly-build-$BUILDKITE_BUILD_ID
+{%- else -%}
 rocm/vllm-dev:ci_base-build-$BUILDKITE_BUILD_ID
+{%- endif -%}
 {%- endmacro %}
 
 {% macro amd_ci_image() -%}
@@ -169,10 +173,31 @@ rocm/vllm-ci:build-$BUILDKITE_BUILD_ID
         agents:
           queue: amd-cpu
 
-      - label: "AMD: :docker: build test image and artifacts"
+      {% if aiter_nightly == "1" %}
+      - label: "AMD: :crescent_moon: install AITER nightly"
         depends_on: "ensure-ci-base-amd"
         soft_fail: false
         commands:
+          - curl -fsSL -o aiter-nightly-swap.sh "https://raw.githubusercontent.com/vllm-project/ci-infra/{{ vllm_ci_branch }}/buildkite/scripts/aiter-nightly-swap.sh"
+          - bash aiter-nightly-swap.sh
+        key: "aiter-nightly-amd"
+        timeout_in_minutes: 60
+        env:
+          VLLM_CI_BRANCH: "{{ vllm_ci_branch }}"
+{{ amd_infra_retry('        ', true) }}
+        agents:
+          queue: amd-cpu
+      {% endif %}
+      {% set ci_base_ready_key = "aiter-nightly-amd" if aiter_nightly == "1" else "ensure-ci-base-amd" %}
+
+      - label: "AMD: :docker: build test image and artifacts"
+        depends_on: "{{ ci_base_ready_key }}"
+        soft_fail: false
+        commands:
+          {% if aiter_nightly == "1" %}
+          {# Here, not in the swap, so a retried ensure-ci-base-amd can't undo it. #}
+          - 'buildkite-agent meta-data set rocm-ci-base-image "$$(buildkite-agent meta-data get aiter-nightly-ci-base)"'
+          {% endif %}
           - bash .buildkite/scripts/rocm/build-test-image.sh
           - bash .buildkite/scripts/rocm/smoke-test-image.sh
         key: "image-build-amd"
@@ -185,14 +210,19 @@ rocm/vllm-ci:build-$BUILDKITE_BUILD_ID
           PYTORCH_ROCM_ARCH: "gfx90a;gfx942;gfx950"
           IMAGE_TAG: "{{ amd_ci_image() | safe }}"
           REMOTE_VLLM: "0"
+          {% if aiter_nightly == "1" %}
+          {# Layers built on the nightly stay out of the caches main builds read. #}
+          ROCM_CACHE_BRANCH_NAME: "aiter-nightly"
+          ROCM_CONTENT_CACHE_EXPORT_MODE: "never"
+          {% endif %}
 {{ amd_infra_retry('        ', true) }}
         agents:
           queue: amd-cpu
 
-      {# Native pods pull ci_base-build-$BUILDKITE_BUILD_ID. Fail before those
-         jobs schedule if that tag is not on Docker Hub. DinD jobs do not wait. #}
+      {# Native pods pull amd_native_base_image(). Fail before those jobs
+         schedule if that tag is not on Docker Hub. DinD jobs do not wait. #}
       - label: "AMD: :docker: verify native ci_base"
-        depends_on: "ensure-ci-base-amd"
+        depends_on: "{{ ci_base_ready_key }}"
         soft_fail: false
         commands:
           - docker manifest inspect "{{ amd_native_base_image() | safe }}"
@@ -203,7 +233,9 @@ rocm/vllm-ci:build-$BUILDKITE_BUILD_ID
           queue: amd-cpu
 
     {% for step in steps %}
-    {% if step.mirror_hardwares and mirror_hw in step.mirror_hardwares %}
+    {# The GPUs AITER builds kernels for: AITER_ROCM_ARCH in Dockerfile.rocm_base. #}
+    {% set aiter_step = "amdgfx942nightly" in (step.mirror_hardwares or []) or "amdgfx950nightly" in (step.mirror_hardwares or []) %}
+    {% if step.mirror_hardwares and mirror_hw in step.mirror_hardwares and (aiter_nightly != "1" or aiter_step) %}
 
     {% set ns = namespace(blocked=1) %}
     {% set step_slug = amd_step_slug(step) %}
@@ -235,7 +267,7 @@ rocm/vllm-ci:build-$BUILDKITE_BUILD_ID
         {% set ns.blocked = 0 %}
       {% endif %}
 
-      {% set step_gated = (ns.blocked == 1 or (step.optional and nightly != "1")) and not (step.autorun_on_main == true and branch == "main") %}
+      {% set step_gated = aiter_nightly != "1" and (ns.blocked == 1 or (step.optional and nightly != "1")) and not (step.autorun_on_main == true and branch == "main") %}
       {% if step_gated %}
       - block: "Run {{ step.agent_pool }}: {{ step.label }}"
         depends_on: image-build-amd

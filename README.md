@@ -89,6 +89,20 @@ A Python tool (`buildkite/pipeline_generator/`) that reads step definitions from
 
 `buildkite/test-template-amd.j2` renders vLLM's [`test-amd.yaml`](https://github.com/vllm-project/vllm/blob/main/.buildkite/test-amd.yaml) into Buildkite YAML using [minijinja-cli](https://github.com/mitsuhiko/minijinja).
 
+#### AITER nightly (AMD CI)
+
+`AITER_NIGHTLY=1`, on a scheduled `amd-ci` build of `main`, tests last night's [AITER](https://github.com/ROCm/aiter) build against vLLM:
+
+1. `aiter-nightly-amd` (`buildkite/scripts/aiter-nightly-swap.sh`, `aiter_nightly.py`) installs the newest AITER nightly wheel for the image's ROCm and Python over this build's ci_base without replacing the packages vLLM builds from source, and checks that every prebuilt AITER module loads. It pushes the result as `rocm/vllm-dev:ci_base-aiter-nightly-build-$BUILDKITE_BUILD_ID`.
+2. The test image and every native GPU job run on that image. Test image layers go to an `aiter-nightly` cache branch.
+3. Every `amdproduction` step on MI300 or MI355 (`amdgfx942nightly`, `amdgfx950nightly`) runs, unblocked. MI250 is left out: AITER builds no kernels for it.
+
+The swap step fails before any GPU job runs, with an error annotation and exit code: `10` no wheel for the image's ROCm/Python, `11` newest wheel older than 2 days, `12` install failed, `13` prebuilt modules do not load.
+
+`AITER_NIGHTLY_WHEEL_URL` tests a given wheel instead of the newest (to bisect); it is not checked for age. A retried swap reinstalls the wheel its first attempt chose.
+
+The wheel is installed over vLLM's image rather than built into the ROCm base, so don't compare performance against baked-in builds.
+
 ### Bootstrap Scripts
 
 | Script | Pipeline | Generation Method |
@@ -224,6 +238,8 @@ These are deployed with `terraform apply` and require a GitHub PAT with organiza
 | `COV_ENABLED` | Enable pytest coverage collection and Codecov upload |
 | `DOCS_ONLY_DISABLE` | Skip docs-only detection (always run CI) |
 | `AMD_MIRROR_HW` | AMD hardware mirror target (default: `amdproduction`) |
+| `AITER_NIGHTLY` | AMD CI: set to `1` to test the latest AITER nightly wheel on every MI300/MI355 production step (see [AITER nightly](#aiter-nightly-amd-ci)); also disables the docs-only skip |
+| `AITER_NIGHTLY_WHEEL_URL` | AMD CI, with `AITER_NIGHTLY=1`: test this AITER nightly wheel instead of the newest |
 | `NOAUTO` | Set to `1` to gate all steps behind manual approval blocks |
 | `PRIORITY` | Set to `HIGH` for high-priority pipeline scheduling |
 
